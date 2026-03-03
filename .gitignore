@@ -1,0 +1,8 @@
+node_modules
+src/main/bin/
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+
