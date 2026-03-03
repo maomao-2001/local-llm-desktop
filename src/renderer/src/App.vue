@@ -26,6 +26,8 @@ interface Message {
   role: 'user' | 'assistant' | 'system'
   content: string | MessageContentPart[]
   files?: AttachedFile[]
+  reasoning?: string
+  reasoningExpanded?: boolean
 }
 
 interface Conversation {
@@ -37,11 +39,20 @@ interface Conversation {
 
 type ServerStatus = 'stopped' | 'starting' | 'running' | 'error'
 
+interface ChatCompletionDeltaPart {
+  text?: string
+  content?: string
+}
+
+interface ChatCompletionDelta {
+  content?: string | ChatCompletionDeltaPart[]
+  reasoning?: string | ChatCompletionDeltaPart[]
+  reasoning_content?: string | ChatCompletionDeltaPart[]
+}
+
 interface ChatCompletionChunk {
   choices?: Array<{
-    delta?: {
-      content?: string
-    }
+    delta?: ChatCompletionDelta
   }>
 }
 
@@ -361,6 +372,28 @@ const tryParseJson = (text: string): unknown | null => {
   }
 }
 
+const parseDeltaText = (value: unknown): string => {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+  return value
+    .map((part) => {
+      if (typeof part === 'string') return part
+      if (part && typeof part === 'object') {
+        const p = part as ChatCompletionDeltaPart
+        return p.text ?? p.content ?? ''
+      }
+      return ''
+    })
+    .join('')
+}
+
+const toggleReasoning = (index: number): void => {
+  const msg = messages.value[index]
+  if (!msg || msg.role !== 'assistant' || !msg.reasoning) return
+  msg.reasoningExpanded = !msg.reasoningExpanded
+  updateCurrentConversation()
+}
+
 const getPromptTokenCount = async (messages: any[]): Promise<number> => {
   try {
     // Combine all messages into a single string for approximation
@@ -498,7 +531,12 @@ const sendMessage = async (): Promise<void> => {
     const reader = response.body?.getReader()
     if (!reader) throw new Error('响应内容为空')
 
-    const assistantMsg = { role: 'assistant', content: '' } as Message
+    const assistantMsg = {
+      role: 'assistant',
+      content: '',
+      reasoning: '',
+      reasoningExpanded: false
+    } as Message
     messages.value.push(assistantMsg)
     updateCurrentConversation()
 
@@ -513,7 +551,14 @@ const sendMessage = async (): Promise<void> => {
       for (const line of lines) {
         if (line.startsWith('data: ') && line !== 'data: [DONE]') {
           const data = tryParseJson(line.slice(6)) as ChatCompletionChunk | null
-          const content = data?.choices?.[0]?.delta?.content ?? ''
+          const delta = data?.choices?.[0]?.delta
+          const content = parseDeltaText(delta?.content)
+          const reasoning = parseDeltaText(delta?.reasoning_content ?? delta?.reasoning)
+
+          if (reasoning) {
+            assistantMsg.reasoning = (assistantMsg.reasoning ?? '') + reasoning
+          }
+
           if (typeof assistantMsg.content === 'string') {
             assistantMsg.content += content
             
@@ -716,6 +761,14 @@ const vFocus = {
         <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
           <div class="message-role">{{ roleLabel(msg.role) }}</div>
           <div class="message-content">
+            <div v-if="msg.role === 'assistant' && msg.reasoning" class="reasoning-block">
+              <button type="button" class="reasoning-toggle" @click="toggleReasoning(i)">
+                <span class="reasoning-label">Reasoning</span>
+                <span class="reasoning-arrow">{{ msg.reasoningExpanded ? '^' : 'v' }}</span>
+              </button>
+              <div v-if="msg.reasoningExpanded" class="reasoning-text">{{ msg.reasoning }}</div>
+            </div>
+
             <div v-if="msg.files && msg.files.length > 0" class="message-files">
               <div v-for="(file, fIndex) in msg.files" :key="fIndex" class="file-card">
                 <div class="file-icon">
@@ -1286,6 +1339,44 @@ body,
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.reasoning-block {
+  margin-bottom: 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 10px;
+  background-color: #f6f8fa;
+  overflow: hidden;
+}
+
+.reasoning-toggle {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  color: #57606a;
+  font-size: 14px;
+}
+
+.reasoning-label {
+  font-weight: 600;
+}
+
+.reasoning-arrow {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.reasoning-text {
+  border-top: 1px solid #d8dee4;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  font-size: 13px;
+  color: #1f2328;
 }
 
 .input-container {
