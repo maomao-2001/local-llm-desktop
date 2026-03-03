@@ -15,7 +15,7 @@ let cachedGpuTotal = 0
 function createWindow(): void {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
-    width: 1100,
+    width: 1000,
     height: 670,
     show: false,
     autoHideMenuBar: true,

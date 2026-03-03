@@ -67,7 +67,7 @@ let startupTimeout: ReturnType<typeof setTimeout> | null = null
 
 const showSettings = ref(false)
 const contextSize = ref(32768)
-const maxTokens = ref(4096)
+const maxTokens = ref(-1)
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const imageInput = ref<HTMLInputElement | null>(null)
@@ -628,6 +628,10 @@ const vFocus = {
         <span class="app-title">AI助手</span>
         <span class="status-badge" :class="serverStatus">{{ statusLabel(serverStatus) }}</span>
       </div>
+      <div class="title-stats-display">
+        <span>内存 : {{ formatBytes(systemStats.memory.used) }}/{{ formatBytes(systemStats.memory.total) }}</span>
+        <span v-if="systemStats.gpu.total > 0">显存 : {{ formatBytes(systemStats.gpu.used) }}/{{ formatBytes(systemStats.gpu.total) }}</span>
+      </div>
       <button class="icon-btn setting-btn" @click="showSettings = true" title="设置">
         <img :src="iconSetting" alt="Settings" />
       </button>
@@ -703,10 +707,6 @@ const vFocus = {
           </button>
         </div>
         
-        <div class="system-stats-display">
-          <span>内存 : {{ formatBytes(systemStats.memory.used) }}/{{ formatBytes(systemStats.memory.total) }}</span>
-          <span v-if="systemStats.gpu.total > 0">显存 : {{ formatBytes(systemStats.gpu.used) }}/{{ formatBytes(systemStats.gpu.total) }}</span>
-        </div>
       </div>
 
       <div ref="chatContainer" class="chat-area">
@@ -883,6 +883,20 @@ body,
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.title-stats-display {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-size: 13px;
+  color: #1f2328;
+  font-family: 'Consolas', monospace;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .app-title {
@@ -1153,18 +1167,6 @@ body,
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.system-stats-display {
-  flex: 1;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 20px;
-  font-size: 13px;
-  color: #1f2328;
-  font-family: 'Consolas', monospace;
-  font-weight: 500;
 }
 
 .control-btn {
