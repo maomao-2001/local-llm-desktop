@@ -1,5 +1,5 @@
 import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
-import { join } from 'path'
+import { basename, dirname, join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { spawn, exec, type ChildProcess } from 'child_process'
@@ -7,10 +7,54 @@ import { Socket } from 'net'
 import os from 'os'
 import si from 'systeminformation'
 import { promisify } from 'util'
+import { existsSync, readdirSync } from 'fs'
 
 const execAsync = promisify(exec)
 let serverProcess: ChildProcess | null = null
 let cachedGpuTotal = 0
+let lastModelDirectory: string | null = null
+
+const multimodalModelKeywords = [
+  'llava',
+  'vision',
+  'minicpmv',
+  'internvl',
+  'qwen-vl',
+  'qwen2vl',
+  'qwen2.5-vl',
+  'qwen3.5',
+  'phi-3.5-vision',
+  'phi3.5-vision',
+  'phi3-vision',
+  'gemma3',
+  'vl'
+]
+
+const multimodalProjectorPattern = /(mmproj|mm-projector|projector)/i
+
+function looksLikeMultimodalModel(modelPath: string): boolean {
+  const filename = basename(modelPath).toLowerCase()
+  return multimodalModelKeywords.some((keyword) => filename.includes(keyword))
+}
+
+function findMmprojPath(modelPath: string): string | null {
+  const modelDir = dirname(modelPath)
+  if (!existsSync(modelDir)) return null
+
+  const candidates = readdirSync(modelDir)
+    .filter((name) => multimodalProjectorPattern.test(name))
+    .filter((name) => /\.(gguf|bin)$/i.test(name))
+
+  if (candidates.length === 0) return null
+
+  const modelName = basename(modelPath).toLowerCase()
+  const preferred = candidates.find((name) => {
+    const lowerName = name.toLowerCase()
+    return modelName.includes('qwen') ? lowerName.includes('qwen') : false
+  })
+
+  return join(modelDir, preferred ?? candidates[0])
+}
 
 function createWindow(): void {
   // Create the browser window.
@@ -71,10 +115,12 @@ app.whenReady().then(() => {
   // Register IPC handlers
   ipcMain.handle('select-model', async () => {
     const result = await dialog.showOpenDialog({
+      defaultPath: lastModelDirectory ?? undefined,
       properties: ['openFile'],
       filters: [{ name: 'GGUF 模型', extensions: ['gguf'] }]
     })
     if (result.canceled || result.filePaths.length === 0) return null
+    lastModelDirectory = dirname(result.filePaths[0])
     return result.filePaths[0]
   })
 
@@ -139,6 +185,25 @@ app.whenReady().then(() => {
         '0'
       ]
       console.log('服务参数：', args)
+
+      if (looksLikeMultimodalModel(modelPath)) {
+        const mmprojPath = findMmprojPath(modelPath)
+        if (mmprojPath) {
+          args.push('--mmproj', mmprojPath)
+          BrowserWindow.getAllWindows().forEach((win) =>
+            win.webContents.send('server-log', `已检测到多模态投影文件：${mmprojPath}`)
+          )
+        } else {
+          BrowserWindow.getAllWindows().forEach((win) =>
+            win.webContents.send(
+              'server-log',
+              '警告：当前模型看起来是多模态模型，但未在同目录找到 mmproj/projector 文件，发送图片可能会导致服务端返回 500。'
+            )
+          )
+        }
+      }
+
+      console.log('server args:', args)
 
       serverProcess = spawn(serverPath, args)
 

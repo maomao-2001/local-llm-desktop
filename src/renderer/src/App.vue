@@ -108,6 +108,7 @@ const supportsImages = computed(() => {
     'qwen2vl',
     'qwen-vl',
     'qwen2.5-vl',
+    'qwen3.5',
     'internvl',
     'yi-vl',
     'phi-3.5-vision',
@@ -372,6 +373,19 @@ const tryParseJson = (text: string): unknown | null => {
   }
 }
 
+const parseErrorDetail = (text: string): string => {
+  const parsed = tryParseJson(text) as
+    | { error?: { message?: string } | string; message?: string }
+    | null
+
+  if (typeof parsed?.error === 'string') return parsed.error
+  if (typeof parsed?.error === 'object' && typeof parsed.error?.message === 'string') {
+    return parsed.error.message
+  }
+  if (typeof parsed?.message === 'string') return parsed.message
+  return text.trim()
+}
+
 const parseDeltaText = (value: unknown): string => {
   if (typeof value === 'string') return value
   if (!Array.isArray(value)) return ''
@@ -525,7 +539,9 @@ const sendMessage = async (): Promise<void> => {
     })
 
     if (!response.ok) {
-      throw new Error(`服务返回状态码 ${response.status}`)
+      const errorText = await response.text()
+      const detail = parseErrorDetail(errorText)
+      throw new Error(detail ? `服务返回状态码 ${response.status}：${detail}` : `服务返回状态码 ${response.status}`)
     }
 
     const reader = response.body?.getReader()
