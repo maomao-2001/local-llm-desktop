@@ -1,7 +1,7 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
 export interface IElectronAPI {
-  selectModel: () => Promise<string | null>
+  selectModel: (defaultPath?: string) => Promise<string | null>
   startServer: (modelPath: string, contextSize: number) => Promise<{ success: boolean; message: string }>
   stopServer: () => Promise<void>
   checkServerStatus: () => Promise<boolean>

@@ -113,9 +113,9 @@ app.whenReady().then(() => {
   ipcMain.on('ping', () => console.log('pong'))
 
   // Register IPC handlers
-  ipcMain.handle('select-model', async () => {
+  ipcMain.handle('select-model', async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
-      defaultPath: lastModelDirectory ?? undefined,
+      defaultPath: defaultPath || lastModelDirectory || undefined,
       properties: ['openFile'],
       filters: [{ name: 'GGUF 模型', extensions: ['gguf'] }]
     })

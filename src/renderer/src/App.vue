@@ -67,14 +67,18 @@ const input = ref('')
 const serverStatus = ref<ServerStatus>('stopped')
 const serverLogs = ref<string[]>([])
 const modelPath = ref('')
+const MODEL_PATH_STORAGE_KEY = 'selectedModelPath'
 const chatContainer = ref<HTMLElement | null>(null)
+const shouldAutoScroll = ref(true)
 const isGenerating = ref(false)
+const currentRequestController = ref<AbortController | null>(null)
 const stats = ref({
   contextUsed: 0,
   outputTokens: 0,
   speed: 0
 })
 let startupTimeout: ReturnType<typeof setTimeout> | null = null
+const AUTO_SCROLL_THRESHOLD = 64
 
 const showSettings = ref(false)
 const contextSize = ref(32768)
@@ -95,6 +99,12 @@ const formatBytes = (bytes: number): string => {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
+
+const isAbortError = (err: unknown): boolean => {
+  if (err instanceof DOMException && err.name === 'AbortError') return true
+  if (err instanceof Error && err.name === 'AbortError') return true
+  return false
 }
 
 const supportsImages = computed(() => {
@@ -149,6 +159,11 @@ const handleInputKeydown = (e: KeyboardEvent): void => {
   if (e.shiftKey) return
   e.preventDefault()
   void sendMessage()
+}
+
+const stopGenerating = (): void => {
+  if (!isGenerating.value) return
+  currentRequestController.value?.abort()
 }
 
 const saveConversations = (): void => {
@@ -260,6 +275,12 @@ onMounted(async () => {
   const savedMaxTokens = localStorage.getItem('maxTokens')
   if (savedMaxTokens) maxTokens.value = parseInt(savedMaxTokens)
 
+  const savedModelPath = localStorage.getItem(MODEL_PATH_STORAGE_KEY)
+  if (savedModelPath) {
+    modelPath.value = savedModelPath
+    addLog(`已恢复模型：${savedModelPath}`)
+  }
+
   loadConversations()
   if (conversations.value.length === 0) {
     createConversation()
@@ -319,9 +340,10 @@ const addLog = (msg: string): void => {
 }
 
 const selectModel = async (): Promise<void> => {
-  const path = await window.api.selectModel()
+  const path = await window.api.selectModel(modelPath.value || undefined)
   if (path) {
     modelPath.value = path
+    localStorage.setItem(MODEL_PATH_STORAGE_KEY, path)
     addLog(`已选择模型：${path}`)
   }
 }
@@ -408,13 +430,16 @@ const toggleReasoning = (index: number): void => {
   updateCurrentConversation()
 }
 
-const getPromptTokenCount = async (messages: any[]): Promise<number> => {
+const getPromptTokenCount = async (
+  messages: Array<Pick<Message, 'content'>>,
+  signal?: AbortSignal
+): Promise<number> => {
   try {
     // Combine all messages into a single string for approximation
     const content = messages.map((m) => {
       if (typeof m.content === 'string') return m.content
       if (Array.isArray(m.content)) {
-        return m.content.map((c: any) => c.text || '').join('\n')
+        return m.content.map((c: MessageContentPart) => c.text || '').join('\n')
       }
       return ''
     }).join('\n\n')
@@ -422,13 +447,15 @@ const getPromptTokenCount = async (messages: any[]): Promise<number> => {
     const response = await fetch('http://127.0.0.1:8080/tokenize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content })
+      body: JSON.stringify({ content }),
+      signal
     })
 
     if (!response.ok) return 0
     const data = await response.json()
     return data.tokens ? data.tokens.length : 0
-  } catch {
+  } catch (err) {
+    if (isAbortError(err)) throw err
     return 0
   }
 }
@@ -485,9 +512,11 @@ const sendMessage = async (): Promise<void> => {
   pendingImage.value = null
   input.value = ''
   isGenerating.value = true
+  const abortController = new AbortController()
+  currentRequestController.value = abortController
 
   await nextTick()
-  scrollToBottom()
+  scrollToBottom(true)
 
   try {
     const requestMessages = messages.value.map((m) => {
@@ -521,7 +550,7 @@ const sendMessage = async (): Promise<void> => {
     })
 
     // Calculate prompt tokens
-    const promptTokens = await getPromptTokenCount(requestMessages)
+    const promptTokens = await getPromptTokenCount(requestMessages, abortController.signal)
     stats.value.contextUsed = promptTokens
     stats.value.outputTokens = 0
     stats.value.speed = 0
@@ -535,7 +564,8 @@ const sendMessage = async (): Promise<void> => {
         messages: requestMessages,
         stream: true,
         max_tokens: maxTokens.value
-      })
+      }),
+      signal: abortController.signal
     })
 
     if (!response.ok) {
@@ -605,10 +635,15 @@ const sendMessage = async (): Promise<void> => {
       }
     }
   } catch (err: unknown) {
+    if (isAbortError(err)) {
+      addLog('已停止生成')
+      return
+    }
     const msg = getErrorMessage(err)
     addLog(`发送消息失败：${msg}`)
     messages.value.push({ role: 'system', content: `错误：${msg}` })
   } finally {
+    currentRequestController.value = null
     isGenerating.value = false
     updateCurrentConversation()
     scrollToBottom()
@@ -617,19 +652,39 @@ const sendMessage = async (): Promise<void> => {
 
 const handleFileUpload = async (event: Event): Promise<void> => {
   const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (!file) return
+  const files = Array.from(target.files ?? [])
+  if (files.length === 0) return
+
+  let addedCount = 0
+  let skippedBinaryCount = 0
+  let failedCount = 0
+
   try {
-    const text = await file.text()
-    if (text.slice(0, 1000).includes('\0')) {
-      alert('暂不支持二进制文件，请上传文本文件。')
-      return
+    for (const file of files) {
+      try {
+        const text = await file.text()
+        if (text.slice(0, 1000).includes('\0')) {
+          skippedBinaryCount++
+          continue
+        }
+        attachedFiles.value.push(file)
+        addedCount++
+        addLog(`已添加文件：${file.name}`)
+      } catch (err) {
+        failedCount++
+        addLog(`读取文件失败：${file.name}，${getErrorMessage(err)}`)
+      }
     }
-    attachedFiles.value.push(file)
-    addLog(`已添加文件：${file.name}`)
-  } catch (err) {
-    alert('读取文件失败')
-    addLog(`读取文件失败：${getErrorMessage(err)}`)
+
+    if (skippedBinaryCount > 0) {
+      addLog(`已跳过 ${skippedBinaryCount} 个二进制文件`)
+    }
+    if (failedCount > 0) {
+      addLog(`有 ${failedCount} 个文件读取失败`)
+    }
+    if (addedCount === 0) {
+      alert('没有可添加的文本文件')
+    }
   } finally {
     target.value = ''
   }
@@ -671,10 +726,25 @@ const saveSettings = (): void => {
   }
 }
 
-const scrollToBottom = (): void => {
-  if (chatContainer.value) {
-    chatContainer.value.scrollTop = chatContainer.value.scrollHeight
-  }
+const isChatNearBottom = (): boolean => {
+  if (!chatContainer.value) return true
+  const { scrollTop, scrollHeight, clientHeight } = chatContainer.value
+  return scrollHeight - scrollTop - clientHeight <= AUTO_SCROLL_THRESHOLD
+}
+
+const handleChatScroll = (): void => {
+  shouldAutoScroll.value = isChatNearBottom()
+}
+
+const handleMessageImageLoad = (): void => {
+  scrollToBottom()
+}
+
+const scrollToBottom = (force = false): void => {
+  if (!chatContainer.value) return
+  if (!force && !shouldAutoScroll.value) return
+  chatContainer.value.scrollTop = chatContainer.value.scrollHeight
+  shouldAutoScroll.value = true
 }
 
 const vFocus = {
@@ -770,7 +840,7 @@ const vFocus = {
         
       </div>
 
-      <div ref="chatContainer" class="chat-area">
+      <div ref="chatContainer" class="chat-area" @scroll="handleChatScroll">
         <div v-if="messages.length === 0" class="empty-state">
           先选择模型并启动服务，然后开始对话。
         </div>
@@ -804,6 +874,7 @@ const vFocus = {
                   v-if="part.type === 'image_url'"
                   :src="part.image_url?.url"
                   class="message-image"
+                  @load="handleMessageImageLoad"
                 />
               </div>
             </template>
@@ -853,7 +924,7 @@ const vFocus = {
             @keydown="handleInputKeydown"
           ></textarea>
           
-          <input type="file" ref="fileInput" @change="handleFileUpload" style="display: none" />
+          <input type="file" ref="fileInput" @change="handleFileUpload" multiple style="display: none" />
           <input
             type="file"
             ref="imageInput"
@@ -881,10 +952,13 @@ const vFocus = {
 
           <button
             class="send-btn"
-            :disabled="serverStatus !== 'running' || isGenerating"
-            @click="sendMessage"
+            :class="{ 'stop-generate-btn': isGenerating }"
+            :disabled="serverStatus !== 'running' && !isGenerating"
+            :title="isGenerating ? '停止生成' : '发送'"
+            @click="isGenerating ? stopGenerating() : sendMessage()"
           >
-            {{ isGenerating ? '生成中...' : '发送' }}
+            <span v-if="isGenerating" class="stop-generate-icon" aria-hidden="true"></span>
+            <span v-else>发送</span>
           </button>
         </div>
       </div>
@@ -1344,7 +1418,11 @@ body,
 }
 
 .message-image {
-  max-width: 100%;
+  max-width: min(100%, 480px);
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
   border-radius: 8px;
   margin-top: 8px;
   display: block;
@@ -1608,6 +1686,9 @@ button:disabled {
 .send-btn {
   height: 44px;
   min-width: 92px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .stop-btn {
@@ -1616,6 +1697,39 @@ button:disabled {
 
 .stop-btn:hover:not(:disabled) {
   background-color: #bd2130;
+}
+
+.stop-generate-btn {
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #d0d7de;
+  background-color: #ffffff;
+}
+
+.stop-generate-btn:hover:not(:disabled) {
+  background-color: #f3f4f6;
+  border-color: #ef4444;
+}
+
+.stop-generate-icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid #111827;
+  border-radius: 999px;
+}
+
+.stop-generate-icon::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  background-color: #111827;
+  transform: translate(-50%, -50%);
 }
 
 .status-indicator {

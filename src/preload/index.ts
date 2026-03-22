@@ -3,7 +3,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
 const api = {
-  selectModel: () => ipcRenderer.invoke('select-model'),
+  selectModel: (defaultPath?: string) => ipcRenderer.invoke('select-model', defaultPath),
   startServer: (modelPath: string, contextSize: number) => ipcRenderer.invoke('start-server', modelPath, contextSize),
   stopServer: () => ipcRenderer.invoke('stop-server'),
   checkServerStatus: () => ipcRenderer.invoke('check-server-status'),
