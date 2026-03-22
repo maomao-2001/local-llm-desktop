@@ -130,6 +130,16 @@ const supportsImages = computed(() => {
   return keywords.some((k) => name.includes(k))
 })
 
+const mainViewState = computed<'setup' | 'loading' | 'chat'>(() => {
+  if (serverStatus.value === 'running') return 'chat'
+  if (serverStatus.value === 'starting') return 'loading'
+  return 'setup'
+})
+
+const lastServerLog = computed(() => {
+  return [...serverLogs.value].reverse().find((log) => log.trim().length > 0) ?? ''
+})
+
 const roleLabel = (role: Message['role']): string => {
   switch (role) {
     case 'user':
@@ -584,6 +594,7 @@ const sendMessage = async (): Promise<void> => {
       reasoningExpanded: false
     } as Message
     messages.value.push(assistantMsg)
+    const assistantMessage = messages.value[messages.value.length - 1]
     updateCurrentConversation()
 
     const decoder = new TextDecoder()
@@ -601,12 +612,12 @@ const sendMessage = async (): Promise<void> => {
           const content = parseDeltaText(delta?.content)
           const reasoning = parseDeltaText(delta?.reasoning_content ?? delta?.reasoning)
 
-          if (reasoning) {
-            assistantMsg.reasoning = (assistantMsg.reasoning ?? '') + reasoning
+          if (reasoning && assistantMessage) {
+            assistantMessage.reasoning = (assistantMessage.reasoning ?? '') + reasoning
           }
 
-          if (typeof assistantMsg.content === 'string') {
-            assistantMsg.content += content
+          if (assistantMessage && typeof assistantMessage.content === 'string') {
+            assistantMessage.content += content
             
             // Update stats
             if (content) {
@@ -814,154 +825,198 @@ const vFocus = {
     </div>
 
     <div class="main-content">
-      <div class="top-controls">
-        <div class="control-group-horizontal">
-          <button
-            class="control-btn"
-            :disabled="serverStatus === 'running' || serverStatus === 'starting'"
-            @click="selectModel"
-          >
-            选择模型
-          </button>
-          <div v-if="modelPath" class="model-path-display" :title="modelPath">
-            {{ modelPath.split('\\').pop() }}
-          </div>
-          <button
-            class="control-btn primary-btn"
-            :disabled="serverStatus === 'running' || serverStatus === 'starting' || !modelPath"
-            @click="startServer"
-          >
-            启动服务
-          </button>
-          <button class="control-btn stop-btn" :disabled="serverStatus === 'stopped'" @click="stopServer">
-            停止服务
-          </button>
-        </div>
-        
-      </div>
-
-      <div ref="chatContainer" class="chat-area" @scroll="handleChatScroll">
-        <div v-if="messages.length === 0" class="empty-state">
-          先选择模型并启动服务，然后开始对话。
-        </div>
-        <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
-          <div class="message-role">{{ roleLabel(msg.role) }}</div>
-          <div class="message-content">
-            <div v-if="msg.role === 'assistant' && msg.reasoning" class="reasoning-block">
-              <button type="button" class="reasoning-toggle" @click="toggleReasoning(i)">
-                <span class="reasoning-label">Reasoning</span>
-                <span class="reasoning-arrow">{{ msg.reasoningExpanded ? '^' : 'v' }}</span>
-              </button>
-              <div v-if="msg.reasoningExpanded" class="reasoning-text">{{ msg.reasoning }}</div>
-            </div>
-
-            <div v-if="msg.files && msg.files.length > 0" class="message-files">
-              <div v-for="(file, fIndex) in msg.files" :key="fIndex" class="file-card">
-                <div class="file-icon">
-                  <img :src="iconFiles" alt="file" />
-                </div>
-                <div class="file-info">
-                  <div class="file-name" :title="file.name">{{ file.name }}</div>
-                  <div class="file-size">{{ (file.size / 1024).toFixed(1) }} KB</div>
-                </div>
-              </div>
-            </div>
-
-            <template v-if="Array.isArray(msg.content)">
-              <div v-for="(part, idx) in msg.content" :key="idx">
-                <div v-if="part.type === 'text'" style="white-space: pre-wrap">{{ part.text }}</div>
-                <img
-                  v-if="part.type === 'image_url'"
-                  :src="part.image_url?.url"
-                  class="message-image"
-                  @load="handleMessageImageLoad"
-                />
-              </div>
-            </template>
-            <template v-else>
-              <div style="white-space: pre-wrap">{{ msg.content }}</div>
-            </template>
-          </div>
-        </div>
-      </div>
-
-      <div class="input-container">
-        <div v-if="attachedFiles.length > 0" class="file-preview-area">
-          <div v-for="(file, index) in attachedFiles" :key="index" class="file-card">
-            <div class="file-icon">
-              <img :src="iconFiles" alt="file" />
-            </div>
-            <div class="file-info">
-              <div class="file-name" :title="file.name">{{ file.name }}</div>
-              <div class="file-size">{{ (file.size / 1024).toFixed(1) }} KB</div>
-            </div>
-            <button class="remove-file-btn" @click="removeFile(index)">×</button>
-          </div>
-        </div>
-
-        <div v-if="pendingImage" class="image-preview">
-          <img :src="pendingImage" alt="Preview" />
-          <button class="close-btn" @click="clearPendingImage">×</button>
-        </div>
-
-        <div v-if="serverStatus === 'running' && (isGenerating || stats.contextUsed > 0)" class="stats-bar">
-          <span class="stat-item">
-            Context: {{ stats.contextUsed }}/{{ contextSize }} ({{ Math.round(stats.contextUsed / contextSize * 100) }}%)
-          </span>
-          <span class="stat-item">
-            Output: {{ stats.outputTokens }}/{{ maxTokens === -1 ? '∞' : maxTokens }}
-          </span>
-          <span class="stat-item">
-            {{ stats.speed.toFixed(1) }} t/s
-          </span>
-        </div>
-
-        <div class="input-area">
-          <textarea
-            v-model="input"
-            placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-            :disabled="serverStatus !== 'running' || isGenerating"
-            @keydown="handleInputKeydown"
-          ></textarea>
-          
-          <input type="file" ref="fileInput" @change="handleFileUpload" multiple style="display: none" />
-          <input
-            type="file"
-            ref="imageInput"
-            @change="handleImageUpload"
-            accept="image/*"
-            style="display: none"
-          />
-
-          <div class="action-buttons">
-            <button class="icon-btn" @click="() => fileInput?.click()" title="上传文件" :disabled="serverStatus !== 'running'">
-              <img :src="iconFiles" alt="文件" />
-              <span>文件</span>
-            </button>
+      <Transition name="controls-fade">
+        <div v-if="mainViewState === 'chat'" class="top-controls">
+          <div class="control-group-horizontal">
             <button
-              v-if="supportsImages"
-              class="icon-btn"
-              @click="() => imageInput?.click()"
-              title="上传图片"
-              :disabled="serverStatus !== 'running'"
+              class="control-btn"
+              :disabled="serverStatus === 'running' || serverStatus === 'starting'"
+              @click="selectModel"
             >
-              <img :src="iconPicture" alt="图片" />
-              <span>图片</span>
+              选择模型
+            </button>
+            <div v-if="modelPath" class="model-path-display" :title="modelPath">
+              {{ modelPath.split('\\').pop() }}
+            </div>
+            <button
+              class="control-btn primary-btn"
+              :disabled="serverStatus === 'running' || serverStatus === 'starting' || !modelPath"
+              @click="startServer"
+            >
+              启动服务
+            </button>
+            <button class="control-btn stop-btn" :disabled="serverStatus === 'stopped'" @click="stopServer">
+              停止服务
             </button>
           </div>
-
-          <button
-            class="send-btn"
-            :class="{ 'stop-generate-btn': isGenerating }"
-            :disabled="serverStatus !== 'running' && !isGenerating"
-            :title="isGenerating ? '停止生成' : '发送'"
-            @click="isGenerating ? stopGenerating() : sendMessage()"
-          >
-            <span v-if="isGenerating" class="stop-generate-icon" aria-hidden="true"></span>
-            <span v-else>发送</span>
-          </button>
         </div>
-      </div>
+      </Transition>
+
+      <Transition name="main-panel" mode="out-in">
+        <div v-if="mainViewState === 'setup'" key="setup" class="launch-state">
+          <div class="launch-state-card">
+            <div class="launch-state-badge" :class="{ error: serverStatus === 'error' }">
+              {{ serverStatus === 'error' ? '启动失败' : '未加载模型' }}
+            </div>
+            <h2 class="launch-state-title">
+              {{ serverStatus === 'error' ? '模型加载失败，请重新启动服务' : '先加载模型，再开始对话' }}
+            </h2>
+            <div class="launch-controls">
+              <div class="control-group-horizontal launch-control-group">
+                <button class="control-btn" @click="selectModel">选择模型</button>
+                <div v-if="modelPath" class="model-path-display launch-model-path" :title="modelPath">
+                  {{ modelPath.split('\\').pop() }}
+                </div>
+                <div v-else class="model-path-display launch-model-path is-placeholder">尚未选择模型</div>
+                <button class="control-btn primary-btn" :disabled="!modelPath" @click="startServer">
+                  启动服务
+                </button>
+              </div>
+            </div>
+            <div v-if="serverStatus === 'error' && lastServerLog" class="launch-error-message">
+              {{ lastServerLog }}
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="mainViewState === 'loading'" key="loading" class="launch-state launch-state-loading">
+          <div class="launch-state-card loading-card">
+            <div class="loading-spinner" aria-hidden="true"></div>
+            <div class="launch-state-badge">加载中</div>
+            <h2 class="launch-state-title">正在加载模型，请稍候</h2>
+            <div v-if="modelPath" class="model-path-display launch-model-path loading-model-path" :title="modelPath">
+              {{ modelPath.split('\\').pop() }}
+            </div>
+          </div>
+        </div>
+
+        <div v-else key="chat" class="chat-panel">
+          <div ref="chatContainer" class="chat-area" @scroll="handleChatScroll">
+            <div v-if="messages.length === 0" class="empty-state">
+              可以开始对话了
+            </div>
+            <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
+              <div class="message-role">{{ roleLabel(msg.role) }}</div>
+              <div class="message-content">
+                <div v-if="msg.role === 'assistant' && msg.reasoning" class="reasoning-block">
+                  <button type="button" class="reasoning-toggle" @click="toggleReasoning(i)">
+                    <span class="reasoning-label">Reasoning</span>
+                    <span class="reasoning-arrow">{{ msg.reasoningExpanded ? '^' : 'v' }}</span>
+                  </button>
+                  <div v-if="msg.reasoningExpanded" class="reasoning-text">{{ msg.reasoning }}</div>
+                </div>
+
+                <div v-if="msg.files && msg.files.length > 0" class="message-files">
+                  <div v-for="(file, fIndex) in msg.files" :key="fIndex" class="file-card">
+                    <div class="file-icon">
+                      <img :src="iconFiles" alt="file" />
+                    </div>
+                    <div class="file-info">
+                      <div class="file-name" :title="file.name">{{ file.name }}</div>
+                      <div class="file-size">{{ (file.size / 1024).toFixed(1) }} KB</div>
+                    </div>
+                  </div>
+                </div>
+
+                <template v-if="Array.isArray(msg.content)">
+                  <div v-for="(part, idx) in msg.content" :key="idx">
+                    <div v-if="part.type === 'text'" style="white-space: pre-wrap">{{ part.text }}</div>
+                    <img
+                      v-if="part.type === 'image_url'"
+                      :src="part.image_url?.url"
+                      class="message-image"
+                      @load="handleMessageImageLoad"
+                    />
+                  </div>
+                </template>
+                <template v-else>
+                  <div style="white-space: pre-wrap">{{ msg.content }}</div>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <Transition name="input-fade">
+            <div class="input-container">
+              <div v-if="attachedFiles.length > 0" class="file-preview-area">
+                <div v-for="(file, index) in attachedFiles" :key="index" class="file-card">
+                  <div class="file-icon">
+                    <img :src="iconFiles" alt="file" />
+                  </div>
+                  <div class="file-info">
+                    <div class="file-name" :title="file.name">{{ file.name }}</div>
+                    <div class="file-size">{{ (file.size / 1024).toFixed(1) }} KB</div>
+                  </div>
+                  <button class="remove-file-btn" @click="removeFile(index)">×</button>
+                </div>
+              </div>
+
+              <div v-if="pendingImage" class="image-preview">
+                <img :src="pendingImage" alt="Preview" />
+                <button class="close-btn" @click="clearPendingImage">×</button>
+              </div>
+
+              <div v-if="serverStatus === 'running' && (isGenerating || stats.contextUsed > 0)" class="stats-bar">
+                <span class="stat-item">
+                  Context: {{ stats.contextUsed }}/{{ contextSize }} ({{ Math.round(stats.contextUsed / contextSize * 100) }}%)
+                </span>
+                <span class="stat-item">
+                  Output: {{ stats.outputTokens }}/{{ maxTokens === -1 ? '∞' : maxTokens }}
+                </span>
+                <span class="stat-item">
+                  {{ stats.speed.toFixed(1) }} t/s
+                </span>
+              </div>
+
+              <div class="input-area">
+                <textarea
+                  v-model="input"
+                  placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+                  :disabled="serverStatus !== 'running' || isGenerating"
+                  @keydown="handleInputKeydown"
+                ></textarea>
+
+                <input type="file" ref="fileInput" @change="handleFileUpload" multiple style="display: none" />
+                <input
+                  type="file"
+                  ref="imageInput"
+                  @change="handleImageUpload"
+                  accept="image/*"
+                  style="display: none"
+                />
+
+                <div class="action-buttons">
+                  <button class="icon-btn" @click="() => fileInput?.click()" title="上传文件" :disabled="serverStatus !== 'running'">
+                    <img :src="iconFiles" alt="文件" />
+                    <span>文件</span>
+                  </button>
+                  <button
+                    v-if="supportsImages"
+                    class="icon-btn"
+                    @click="() => imageInput?.click()"
+                    title="上传图片"
+                    :disabled="serverStatus !== 'running'"
+                  >
+                    <img :src="iconPicture" alt="图片" />
+                    <span>图片</span>
+                  </button>
+                </div>
+
+                <button
+                  class="send-btn"
+                  :class="{ 'stop-generate-btn': isGenerating }"
+                  :disabled="serverStatus !== 'running' && !isGenerating"
+                  :title="isGenerating ? '停止生成' : '发送'"
+                  @click="isGenerating ? stopGenerating() : sendMessage()"
+                >
+                  <span v-if="isGenerating" class="stop-generate-icon" aria-hidden="true"></span>
+                  <span v-else>发送</span>
+                </button>
+              </div>
+            </div>
+          </Transition>
+        </div>
+      </Transition>
     </div>
     <div v-if="showSettings" class="settings-overlay">
       <div class="settings-modal">
@@ -1296,6 +1351,10 @@ body,
   flex-direction: column;
   height: 100%;
   position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top, rgba(31, 111, 235, 0.08), transparent 34%),
+    #f7f9fc;
 }
 
 .top-controls {
@@ -1304,6 +1363,8 @@ body,
   border-bottom: 1px solid #e6e8eb;
   display: flex;
   align-items: center;
+  position: relative;
+  z-index: 1;
 }
 
 .control-group-horizontal {
@@ -1361,9 +1422,158 @@ body,
   max-width: 300px;
 }
 
+.model-path-display.is-placeholder {
+  color: #98a2b3;
+}
+
+.chat-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.launch-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.launch-state-card {
+  width: min(720px, 100%);
+  padding: 36px 40px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(208, 215, 222, 0.8);
+  box-shadow:
+    0 24px 60px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  backdrop-filter: blur(10px);
+}
+
+.launch-state-badge {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+  background: rgba(37, 99, 235, 0.1);
+}
+
+.launch-state-badge.error {
+  color: #b42318;
+  background: rgba(240, 68, 56, 0.12);
+}
+
+.launch-state-title {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+  color: #0f172a;
+}
+
+.launch-state-desc {
+  margin: 0;
+  max-width: 520px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #667085;
+}
+
+.launch-controls {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.launch-control-group {
+  width: 100%;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.launch-model-path {
+  max-width: 360px;
+  text-align: left;
+}
+
+.loading-card {
+  max-width: 520px;
+}
+
+.loading-model-path {
+  margin-top: 4px;
+}
+
+.launch-error-message {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
+  color: #b42318;
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.loading-spinner {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 4px solid rgba(31, 111, 235, 0.18);
+  border-top-color: #1f6feb;
+  animation: spin 0.9s linear infinite;
+  box-shadow: 0 0 0 6px rgba(31, 111, 235, 0.06);
+}
+
+.controls-fade-enter-active,
+.controls-fade-leave-active,
+.main-panel-enter-active,
+.main-panel-leave-active,
+.input-fade-enter-active,
+.input-fade-leave-active {
+  transition:
+    opacity 0.28s ease,
+    transform 0.28s ease,
+    filter 0.28s ease;
+}
+
+.controls-fade-enter-from,
+.controls-fade-leave-to,
+.input-fade-enter-from,
+.input-fade-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.main-panel-enter-from,
+.main-panel-leave-to {
+  opacity: 0;
+  transform: translateY(20px) scale(0.985);
+  filter: blur(4px);
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 
 .chat-area {
   flex: 1;
+  min-height: 0;
   padding: 18px;
   overflow-y: auto;
   display: flex;
@@ -1375,7 +1585,8 @@ body,
 .empty-state {
   text-align: center;
   color: #7a869a;
-  margin-top: 120px;
+  margin: auto 0;
+  align-self: center;
 }
 
 .message {
@@ -1890,5 +2101,25 @@ button:disabled {
 
 .settings-actions button:hover {
   opacity: 0.9;
+}
+
+@media (max-width: 900px) {
+  .launch-state {
+    padding: 20px;
+  }
+
+  .launch-state-card {
+    padding: 28px 20px;
+    border-radius: 18px;
+  }
+
+  .launch-state-title {
+    font-size: 24px;
+  }
+
+  .launch-model-path {
+    max-width: 100%;
+    width: 100%;
+  }
 }
 </style>
